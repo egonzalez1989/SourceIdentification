@@ -155,7 +155,7 @@ def generate_clusters(corr):
     return CC, SC
 
 
-def caldelli_clustering(inpath, denoise = lambda X: dwt_denoise(X, level=4), outpath = None,
+def caldelli_clustering(inpath, denoise = dwt_denoise, outpath = None,
                         n_clusters = 0, gen_noise = True, gen_corr = True):
     '''
     Implementation of Caldelli clustering using both noise only and enhanced noise
