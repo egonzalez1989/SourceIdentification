@@ -49,6 +49,7 @@ def dwt_denoise(data, wavelet='db8', level=1, mode='soft', shrinkage='NeighborVa
 def tv_denoise(img, weight=.1):
     mult = 255. if np.max(img) > 1 else 1.
     img = img / mult
+    weight = weight / mult
     if len(img.shape) == 3:
         return (mult * denoise_tv_chambolle(img, weight=weight, multichannel=True))
     else:

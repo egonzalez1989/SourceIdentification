@@ -1,16 +1,12 @@
-import cv2, numpy as np
 import glob, os, copy, time
 from DenoiseTechniques import *
 
-def zero_mean(data, ztype='both'):
+def zero_mean(data):
     '''
-    Subtract row mean value to center data around 0
+    Subtract row-column mean value to center data around 0
     :param data: image data
-    :param ztype:
     :return:
     '''
-    if ztype == 'no':
-        return data
     zm = data - np.mean(data, axis=0)
     zm = (zm.T - np.mean(zm, axis=1)).T
     return zm
@@ -36,7 +32,7 @@ def cosine_enhancer(noise, alpha=.055):
     cpnoise[ltmalpha] = 0
     return cpnoise
 
-def noise_extraction(denoise_func, inpath, outpath = None):
+def noise_extraction(denoise_func, inpath, outpath = None, replace = False):
     '''
     First step: Noise extraction applies the selected denoise function and
     generates noise files.
@@ -48,40 +44,46 @@ def noise_extraction(denoise_func, inpath, outpath = None):
     '''
     if outpath is None:
         outpath = 'tmp/'
-    [os.mkdir(outpath + f) for f in ['', '/noise', '/enhanced']]
+    try:
+        [os.makedirs(os.path.join(outpath, f)) for f in ['', 'noise', 'enhanced']]
+    except:
+        print('File exists: ', os.path.join(outpath))
     files = glob.glob(inpath + '/*')
     for f in files:
         # Get the file name to store the noise files
-        fname = f.split('/')[-1].split('.')[0]
-        img = cv2.imread(f) / 255.0
-        _, img, _ = cv2.split(img)
-        # Noise extraction with DWT for PRNU estimation. Assume every file in inpath is an image, otherwise error will be thrown
-        noise = img - denoise_func(img)
-        # Store noise and enhanced noise to avoid several computations
-        enhanced = cosine_enhancer(noise)
-        np.save(outpath + '/noise/' + fname, noise)
-        np.save(outpath + '/enhanced/' + fname, enhanced)
+        fname = os.path.basename(f)
+        try:
+            img = cv2.imread(f) / 255.0
+            _, img, _ = cv2.split(img)
+            # Noise extraction with DWT for PRNU estimation. Assume every file in inpath is an image, otherwise error will be thrown
+            noise = img - denoise_func(img)
+            # Store noise and enhanced noise to avoid several computations
+            enhanced = cosine_enhancer(noise)
+            np.save(outpath + '/noise/' + fname, noise)
+            np.save(outpath + '/enhanced/' + fname, enhanced)
+        except:
+            print('Error reading: ', f)
     return
 
-def corr_matrix(inpath, outpath = None):
+def corr_matrix(inpath, outfile = None):
     '''
     Get correlation matrix for hierarchical distance
-    :param inpath: Noisy image directory.
+    :param inpath: Directory with noise samples.
     :param outpath: If None, the correlation matrix is stored in tmp dir
     '''
-    if outpath is None:
-        outpath = 'tmp/corr.npy'
+    if outfile is None:
+        outfile = 'tmp/corr.npy'
     # Get noise files from inpath dir
     files = sorted(glob.glob(inpath + '/*.npy'))
     nf = len(files)
     # Dissimilarity matrix computed as 1 - corr(noise[i], noise[j])
     C = np.ones((nf, nf))
-    for i in range(nf-1):
+    for i in range(nf-1 ):
         np1 = np.load(files[i])
         for j in range(i+1, nf):
             np2 = np.load(files[j])
             C[i, j] = C[j, i] = np.corrcoef(np1.flatten(), np2.flatten())[0,1]
-    np.save(outpath, C)
+    np.save(outfile, C)
     return C
 
 def cluster_sc(C, corr):
@@ -102,13 +104,17 @@ def cluster_sc(C, corr):
     SC = np.mean(s)
     return SC
 
-def cluster_corr_similarity(A, B, corr):
+#def cluster_corr_similarity(A, B, corr):
     '''
     Similarity between two clusters based on correlation matrix
+    :param A: 
+    :param B: 
+    :param corr: 
+    :return: 
     '''
-    m, n = len(A), len(B)
-    corr_ij = sum(corr[i,j] for j in B for i in A)
-    return corr_ij / (m+n)
+#    m, n = len(A), len(B)
+#    corr_ij = sum(corr[i,j] for j in B for i in A)
+#    return corr_ij / (m*n)
 
 def generate_clusters(corr):
     '''
@@ -125,7 +131,7 @@ def generate_clusters(corr):
     SC = [0]                     # Silhouette coefficients
     # 2. Loop over 1 <= q <= N-1
     for q in range(1, N):
-        # 2.a. Search for the pair of clusters with maximum similarity
+        # a. Search for the pair of clusters with maximum similarity
         max_sim, max_i, max_j = -1, 0, 0
         M = H.shape[0]
         for i in range(M-1):
@@ -133,38 +139,62 @@ def generate_clusters(corr):
                 if H[i, j] > max_sim:
                     max_sim = H[i, j]
                     max_i, max_j = i, j
-        # 2.b. Delete from H the rows and columns referred to clusters Z <= (U,V)
+        # b. Delete from H the rows and columns referred to clusters Z <= (U,V)
         H = np.delete(np.delete(H, max_i, 0), max_j, 1)
         C[max_i].extend(C[max_j])         # Joining clusters with maximum similarity
         del C[max_j]
         CC.append(copy.deepcopy(C))
         SC.append(cluster_sc(C, corr))
         M = M-1
+        # c. Update H calculating new similarities
         for i in range(M-1):
             for j in range(i+1, M):
-                H[i, j] = H[j, i] = cluster_corr_similarity(C[i], C[j], corr)
+                # Average correlation of clusters
+                H[i, j] = H[j, i] = np.mean([corr[k,l] for l in C[j] for k in C[i]])
+
     return CC, SC
 
-# Cluster technique applied to a set of images in
-def caldelli_clustering(inpath, denoise, enhanced = True, outpath = None, n_clusters = 0):
+
+def caldelli_clustering(inpath, denoise = lambda X: dwt_denoise(X, level=4), outpath = None,
+                        n_clusters = 0, gen_noise = True, gen_corr = True):
+    '''
+    Implementation of Caldelli clustering using both noise only and enhanced noise
+    :param inpath: Dataset path
+    :param denoise: Denoise function to be applied
+    :param outpath: Path to store results. If None is give, a temporal dir is genereted to store results
+    :param n_clusters: Number of clusters to be produced
+    :param gen_noise: If true it generates a dir with noise samples, otherwise it looks for them in the outpath dir
+    :param gen_corr: If true it generates a correlation file, otherwise it looks for it in the outpath dir
+    :return: Two different clusters, corresponding to correlation of noise only, and correlation
+    of enhanced function.
+    '''
     if outpath is None:
         outpath = 'tmp_' + str(time.time())
     # 1: Noise extraction
-    noise_extraction(denoise, inpath = inpath, outpath = outpath)
+    if gen_noise:
+        noise_extraction(denoise, inpath = inpath, outpath = outpath)
+
     # 2: Correlation Matrix for noise and enhanced noise
-    noise_corr_file = outpath + '/noise_corr.npy'
-    enhanced_corr_file = outpath + '/enhanced_corr.npy'
-    noise_corr = corr_matrix(outpath + '/noise', noise_corr_file)
-    enhanced_corr = corr_matrix(outpath + '/enhanced', enhanced_corr_file)
-    # 3: Create clusters
+    noise_corr_file = os.path.join(outpath, 'noise_corr.npy')
+    enhanced_corr_file = os.path.join(outpath, 'enhanced_corr.npy')
+    if gen_corr:
+        noise_corr = corr_matrix(os.path.join(outpath, 'noise'), noise_corr_file)
+        enhanced_corr = corr_matrix(os.path.join(outpath, 'enhanced'), enhanced_corr_file)
+    else:
+        noise_corr = np.load(noise_corr_file)
+        enhanced_corr = np.load(enhanced_corr_file)
+
+    # 3: Create list of clusters and silhouette scores
     CC1, SC1 = generate_clusters(noise_corr)
     CC2, SC2 = generate_clusters(enhanced_corr)
+
+    # Return according to the required number of clusters or the best silhouette score
     if n_clusters > 0:
-        min_clusters1 = CC1[-n_clusters]
-        min_clusters2 = CC1[-n_clusters]
+        noise_clusters = CC1[-n_clusters]
+        enhanced_clusters = CC1[-n_clusters]
     else:
-        min_clusters1 = CC1[SC1.index(min(SC1))]
-        min_clusters2 = CC2[SC2.index(min(SC2))]
-    return min_clusters1, min_clusters2
+        noise_clusters = CC1[SC1.index(min(SC1))]
+        enhanced_clusters = CC2[SC2.index(min(SC2))]
+    return noise_clusters, enhanced_clusters
 
 
